@@ -60,6 +60,23 @@ uv run python main.py --remark --data data/coordinates_webcam.yml --video 0
 
 If you have multiple cameras connected, try `--video 1`, `--video 2`, etc. The `--start-frame` flag is ignored when reading from a webcam (live streams are not seekable).
 
+### Keyboard shortcuts
+
+`main.py` delegates keyboard handling to two interactive OpenCV phases. While the **Parking Lot** window is focused:
+
+**Spot marking** (runs when the `--data` file is empty or you pass `--remark`; the same legend is drawn in the top-left corner of the window):
+
+- **Left-click × 4** — mark the corners of a parking spot
+- **u** — undo the last spot (or any in-progress clicks)
+- **r** — reset and clear all spots
+- **q** — quit marking and save the current spots to the `--data` file
+
+**Live detection** (runs after marking, or immediately if spots already exist):
+
+- **q** — quit the detection loop and close the window
+
+Spots are only written to the `--data` file when you press **q** during marking. To stop the program from the terminal at any time, use **Ctrl+C**.
+
 ### Webcam hardware controls
 
 Live webcam feeds drift in brightness as lighting changes. Rather than software-correcting after the fact, you can set the camera's hardware controls directly — the same V4L2 controls you'd otherwise tweak with `v4l2-ctl --set-ctrl=brightness=192` on Linux. Under the hood this uses `cv2.VideoCapture.set(CAP_PROP_BRIGHTNESS, ...)` etc., which OpenCV routes to V4L2 on Linux, DirectShow on Windows, and AVFoundation on macOS.
@@ -105,16 +122,12 @@ Notes:
 
 Program flow is as follows:
 - User inputs a video source (a webcam device index or a video file path) and a path for the output file of parking space coordinates. When the data file is empty, a still frame is pulled from that same video source for the user to mark spots on.
-- User clicks 4 corners for each spot they want tracked. The marking window shows a hotkey legend in the top-left corner:
-    - **left click × 4** — mark the corners of a spot
-    - **u** — undo the most recent spot (or any in-progress clicks)
-    - **r** — reset and clear *all* spots
-    - **q** — quit and save the current spots to the `--data` file
+- User marks spots interactively (see [Keyboard shortcuts](#keyboard-shortcuts) above).
 - Video begins with the user provided boxes overlayed the video. Occupied spots initialized with red boxes, available spots with green.
     - Car leaves a space, the red box turns green.
     - Car drives into a free space, the green box turns red.
 
-Since spots are now only written to the `--data` file when you press `q`, you can experiment freely while marking and only the final layout is saved. To remove individual spots after the fact, edit the YAML file by hand or re-run with `--remark` to start over.
+To remove individual spots after the fact, edit the YAML file by hand or re-run with `--remark` to start over.
 
 The data on the entering and exiting of these cars can be used for a number of purposes: closest spot detection, analytics on parking lot usage, and for those counters outside of parking garages that tell you how many cars are on each level (to name a few).
 
