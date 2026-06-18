@@ -17,9 +17,33 @@ case rather than failing the run.
 """
 
 import logging
+import sys
+import time
 
 import cv2 as open_cv
 import numpy as np
+
+# After releasing a V4L2 device, some drivers need a moment before the same
+# index can be opened again without ioctl(VIDIOC_QBUF) errors.
+WEBCAM_REOPEN_SETTLE_SECONDS = 1.0
+
+
+def open_webcam(device_index):
+    """Open a webcam capture, preferring the V4L2 backend on Linux."""
+    if sys.platform.startswith("linux"):
+        capture = open_cv.VideoCapture(device_index, open_cv.CAP_V4L2)
+        if capture.isOpened():
+            return capture
+        capture.release()
+    return open_cv.VideoCapture(device_index)
+
+
+def release_webcam(capture, settle=False):
+    """Release a webcam device, optionally waiting for the driver to settle."""
+    if capture is not None:
+        capture.release()
+    if settle and WEBCAM_REOPEN_SETTLE_SECONDS > 0:
+        time.sleep(WEBCAM_REOPEN_SETTLE_SECONDS)
 
 # (CLI/dict name, OpenCV property, human label).
 # The order here is also the order of attempted application.

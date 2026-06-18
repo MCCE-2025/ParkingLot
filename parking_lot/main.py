@@ -29,6 +29,8 @@ from webcam_controls import (
     AutoBrightnessController,
     apply_controls,
     has_any,
+    open_webcam,
+    release_webcam,
 )
 
 # Single OpenCV window title shared between the spot-marking phase and the
@@ -79,6 +81,12 @@ def main():
     data_missing = _is_data_file_empty(data_file)
     should_mark = data_missing or remark
 
+    # When marking from a webcam, keep the capture open through the marking
+    # phase so detection can reuse the same device handle instead of closing
+    # and reopening it (which triggers VIDIOC_QBUF errors on some V4L2
+    # drivers).
+    shared_webcam_capture = None
+
     if should_mark:
         action = "re-mark" if (remark and not data_missing) else "mark"
         if is_webcam:
@@ -88,7 +96,13 @@ def main():
                 video_source,
                 action,
             )
-            frame = _capture_frame(video_source, cam_controls)
+            shared_webcam_capture = open_webcam(video_source)
+            if not shared_webcam_capture.isOpened():
+                raise RuntimeError(
+                    "Could not open webcam device %d for snapshot." % video_source
+                )
+            apply_controls(shared_webcam_capture, cam_controls)
+            frame = _read_usable_webcam_frame(shared_webcam_capture)
         else:
             logging.info(
                 "%s: extracting a still from video file %s (frame %s) to %s spots.",
@@ -129,10 +143,15 @@ def main():
             laplacian=args.laplacian,
             detect_delay=args.detect_delay,
             publisher=publisher,
+            show_laplacian=args.show_laplacian,
+            capture=shared_webcam_capture,
         )
         try:
             detector.detect_motion()
         finally:
+            if shared_webcam_capture is not None:
+                release_webcam(shared_webcam_capture)
+                shared_webcam_capture = None
             if publisher is not None:
                 publisher.disconnect()
 
@@ -215,36 +234,26 @@ def _is_data_file_empty(data_file):
     return True
 
 
-def _capture_frame(
-    device_index,
-    cam_controls=None,
+def _read_usable_webcam_frame(
+    capture,
     warmup_frames=30,
     min_mean_luminance=10.0,
     max_attempts=60,
     settle_seconds=0.5,
 ):
-    """Grab a single frame from the given webcam device index.
+    """Read a single non-black frame from an already-open webcam capture.
 
     Most webcams return solid-black (or near-black) frames for the first
     handful of reads after being opened, especially when auto-exposure
     has just been (re)engaged or hardware controls were changed. We
     therefore:
 
-    1. Sleep briefly after applying controls so the driver can settle.
+    1. Sleep briefly so the driver can settle.
     2. Discard at least ``warmup_frames`` reads.
     3. Keep reading until we get a frame whose mean luminance is above
        ``min_mean_luminance`` (i.e. not effectively black), up to
        ``max_attempts`` total reads.
     """
-    capture = open_cv.VideoCapture(device_index)
-    if not capture.isOpened():
-        raise RuntimeError(
-            "Could not open webcam device %d for snapshot." % device_index
-        )
-    apply_controls(capture, cam_controls or {})
-
-    # Give the driver a moment to apply controls and let auto-exposure
-    # start converging before we trust any frames.
     if settle_seconds > 0:
         time.sleep(settle_seconds)
 
@@ -255,7 +264,6 @@ def _capture_frame(
         if not ok or current is None:
             continue
         last_frame = current
-        # Always discard the first few reads as warm-up.
         if attempt < warmup_frames:
             continue
         gray = open_cv.cvtColor(current, open_cv.COLOR_BGR2GRAY)
@@ -275,21 +283,16 @@ def _capture_frame(
             min_mean_luminance,
         )
 
-    capture.release()
-
     if frame is None:
         if last_frame is not None:
             logging.warning(
-                "Webcam device %d only produced dark frames after %d attempts; "
+                "Webcam only produced dark frames after %d attempts; "
                 "using the last one anyway. Try increasing brightness/exposure "
                 "or pointing the camera at a better-lit scene.",
-                device_index,
                 max_attempts,
             )
             return last_frame
-        raise RuntimeError(
-            "Could not read a frame from webcam device %d." % device_index
-        )
+        raise RuntimeError("Could not read a frame from the open webcam device.")
     return frame
 
 
@@ -457,6 +460,16 @@ def parse_args():
             "passing pedestrians. Default: %.1f."
         )
         % MotionDetector.DETECT_DELAY,
+    )
+    detection_group.add_argument(
+        "--show-laplacian",
+        dest="show_laplacian",
+        action="store_true",
+        help=(
+            "Show the Laplacian operator response (the input used for "
+            "occupancy detection) as a second video feed stacked below "
+            "the main feed."
+        ),
     )
 
     add_iot_args(parser)
