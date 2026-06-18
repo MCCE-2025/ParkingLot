@@ -129,6 +129,7 @@ def main():
             laplacian=args.laplacian,
             detect_delay=args.detect_delay,
             publisher=publisher,
+            show_laplacian=args.show_laplacian,
         )
         try:
             detector.detect_motion()
@@ -457,6 +458,16 @@ def parse_args():
             "passing pedestrians. Default: %.1f."
         )
         % MotionDetector.DETECT_DELAY,
+    )
+    detection_group.add_argument(
+        "--show-laplacian",
+        dest="show_laplacian",
+        action="store_true",
+        help=(
+            "Show the Laplacian operator response (the input used for "
+            "occupancy detection) as a second video feed stacked below "
+            "the main feed."
+        ),
     )
 
     add_iot_args(parser)

@@ -24,12 +24,16 @@ class MotionDetector:
         laplacian=None,
         detect_delay=None,
         publisher=None,
+        show_laplacian=False,
     ):
         self.video = video
         self.coordinates_data = coordinates
         self.start_frame = start_frame
         self.cam_controls = cam_controls or {}
         self.auto_brightness = auto_brightness
+        # When True, a second feed visualising the Laplacian response used
+        # for occupancy detection is stacked below the main feed.
+        self.show_laplacian = show_laplacian
         # When provided, render into this existing window instead of one
         # named after the video source. Lets callers reuse the marking
         # window so it doesn't close and reopen between phases.
@@ -138,9 +142,11 @@ class MotionDetector:
                 position_in_seconds = capture.get(open_cv.CAP_PROP_POS_MSEC) / 1000.0
 
             frame_measured = []
+            frame_magnitudes = [0.0] * len(coordinates_data)
             for index, c in enumerate(coordinates_data):
-                status = self.__apply(grayed, index, c)
+                status, magnitude = self.__apply(grayed, index, c)
                 frame_measured.append(status)
+                frame_magnitudes[index] = magnitude
 
                 if times[index] is not None and self.same_status(
                     statuses, index, status
@@ -182,17 +188,88 @@ class MotionDetector:
             if self.publisher is not None:
                 self.publisher.publish_summary_if_due(statuses, time.time())
 
+            display_frame = new_frame
+            if self.show_laplacian:
+                laplacian_view = self._laplacian_view(grayed, frame_magnitudes)
+                display_frame = np.vstack((new_frame, laplacian_view))
+
             if not window_initialized:
-                frame_h, frame_w = new_frame.shape[:2]
+                frame_h, frame_w = display_frame.shape[:2]
                 setup_display_window(self.window_name, frame_w, frame_h)
                 window_initialized = True
 
-            open_cv.imshow(self.window_name, new_frame)
+            open_cv.imshow(self.window_name, display_frame)
             k = open_cv.waitKey(1)
             if k == ord("q"):
                 break
         capture.release()
         open_cv.destroyAllWindows()
+
+    def _laplacian_view(self, grayed, magnitudes=None):
+        """Build a BGR visualisation of the Laplacian response.
+
+        Mirrors the per-spot detection input by running the same Laplacian
+        operator on the full (blurred, grayed) frame, then rescaling the
+        absolute response to 0–255 so faint edges stay visible. The spot
+        outlines are overlaid so the second feed lines up with the main
+        feed above it. When ``magnitudes`` is given, the measured mean
+        Laplacian value per spot is printed at its centre, coloured by
+        whether it falls below the occupancy threshold (green = empty,
+        blue = occupied), matching the colours used in the main feed.
+        """
+        laplacian = open_cv.Laplacian(grayed, open_cv.CV_64F)
+        magnitude = np.absolute(laplacian)
+        scaled = open_cv.normalize(
+            magnitude, None, 0, 255, open_cv.NORM_MINMAX
+        ).astype(np.uint8)
+        view = open_cv.cvtColor(scaled, open_cv.COLOR_GRAY2BGR)
+
+        for index, p in enumerate(self.coordinates_data):
+            coordinates = self._coordinates(p)
+            open_cv.drawContours(
+                view,
+                [coordinates],
+                contourIdx=-1,
+                color=COLOR_WHITE,
+                thickness=1,
+                lineType=open_cv.LINE_8,
+            )
+
+            if magnitudes is None or index >= len(magnitudes):
+                continue
+
+            value = magnitudes[index]
+            is_empty = value < self.laplacian_threshold
+            label_color = COLOR_GREEN if is_empty else COLOR_BLUE
+            moments = open_cv.moments(coordinates)
+            if moments["m00"] == 0:
+                continue
+            center = (
+                int(moments["m10"] / moments["m00"]) - 12,
+                int(moments["m01"] / moments["m00"]) + 4,
+            )
+            open_cv.putText(
+                view,
+                "%.1f" % value,
+                center,
+                open_cv.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                label_color,
+                1,
+                open_cv.LINE_AA,
+            )
+
+        open_cv.putText(
+            view,
+            "Laplacian (threshold %.1f)" % self.laplacian_threshold,
+            (10, 25),
+            open_cv.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            COLOR_WHITE,
+            2,
+            open_cv.LINE_AA,
+        )
+        return view
 
     def __apply(self, grayed, index, p):
         coordinates = self._coordinates(p)
@@ -208,12 +285,11 @@ class MotionDetector:
         coordinates[:, 0] = coordinates[:, 0] - rect[0]
         coordinates[:, 1] = coordinates[:, 1] - rect[1]
 
-        status = (
-            np.mean(np.abs(laplacian * self.mask[index])) < self.laplacian_threshold
-        )
-        logging.debug("status: %s", status)
+        magnitude = float(np.mean(np.abs(laplacian * self.mask[index])))
+        status = magnitude < self.laplacian_threshold
+        logging.debug("status: %s (magnitude: %.3f)", status, magnitude)
 
-        return status
+        return status, magnitude
 
     @staticmethod
     def _coordinates(p):
