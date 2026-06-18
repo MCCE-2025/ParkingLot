@@ -6,7 +6,7 @@ import numpy as np
 from colors import COLOR_BLUE, COLOR_GREEN, COLOR_WHITE
 from display_window import setup_display_window
 from drawing_utils import draw_contours
-from webcam_controls import apply_controls
+from webcam_controls import apply_controls, open_webcam, release_webcam
 
 
 class MotionDetector:
@@ -25,8 +25,12 @@ class MotionDetector:
         detect_delay=None,
         publisher=None,
         show_laplacian=False,
+        capture=None,
     ):
         self.video = video
+        # Optional pre-opened webcam capture (e.g. kept alive across the
+        # marking phase) so we don't close and reopen the V4L2 device.
+        self._capture = capture
         self.coordinates_data = coordinates
         self.start_frame = start_frame
         self.cam_controls = cam_controls or {}
@@ -50,7 +54,15 @@ class MotionDetector:
         self.mask = []
 
     def detect_motion(self):
-        capture = open_cv.VideoCapture(self.video)
+        owns_capture = self._capture is None
+        if owns_capture:
+            if isinstance(self.video, int):
+                capture = open_webcam(self.video)
+            else:
+                capture = open_cv.VideoCapture(self.video)
+        else:
+            capture = self._capture
+
         if not capture.isOpened():
             raise CaptureReadError(
                 "Could not open video source %r for detection." % (self.video,)
@@ -59,13 +71,14 @@ class MotionDetector:
         # seekable timeline, so skip frame seeking and CAP_PROP_POS_MSEC.
         is_webcam = isinstance(self.video, int)
         if is_webcam:
-            apply_controls(capture, self.cam_controls)
+            if owns_capture:
+                apply_controls(capture, self.cam_controls)
             if self.auto_brightness is not None:
                 self.auto_brightness.attach(capture)
-            # Some UVC drivers (notably on Raspberry Pi) need a few reads
-            # before the first usable frame, especially right after the
-            # snapshot capture released and re-opened the device.
-            self._warmup_capture(capture)
+            # Some UVC drivers need a few reads before the first usable frame
+            # when we opened the device ourselves in this phase.
+            if owns_capture:
+                self._warmup_capture(capture)
         else:
             capture.set(open_cv.CAP_PROP_POS_FRAMES, self.start_frame)
         start_time = time.time()
@@ -202,7 +215,8 @@ class MotionDetector:
             k = open_cv.waitKey(1)
             if k == ord("q"):
                 break
-        capture.release()
+        if owns_capture:
+            release_webcam(capture)
         open_cv.destroyAllWindows()
 
     def _laplacian_view(self, grayed, magnitudes=None):
